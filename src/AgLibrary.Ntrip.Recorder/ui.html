@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NTRIP caster tester</title>
+<style>
+  :root { --bg:#f6f7f9; --fg:#1b1f24; --muted:#667085; --card:#fff; --line:#d6dae1; --accent:#2a6df4;
+          --ok:#1a7f37; --warn:#b26a00; --bad:#c62828; --okbg:#e3f4e8; --warnbg:#fff1d6; --badbg:#fde4e4; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14171b; --fg:#e6e8eb; --muted:#9aa3ad; --card:#1d2127; --line:#343a42; --accent:#6c9bff;
+            --ok:#5bd37a; --warn:#f0b04a; --bad:#ff7b7b; --okbg:#173323; --warnbg:#3a2c12; --badbg:#3d1c1c; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--fg); font:14px/1.4 system-ui, sans-serif; }
+  h1 { font-size:18px; margin:0 0 4px; }
+  p.hint { margin:0 0 12px; color:var(--muted); }
+  .bar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
+  button { font:inherit; padding:6px 12px; border:1px solid var(--line); border-radius:6px; background:var(--card); color:var(--fg); cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button:disabled { opacity:.5; cursor:default; }
+  .wrap { overflow-x:auto; background:var(--card); border:1px solid var(--line); border-radius:8px; }
+  table { border-collapse:collapse; width:100%; min-width:1100px; }
+  th, td { padding:6px 8px; text-align:left; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { font-size:12px; color:var(--muted); font-weight:600; white-space:nowrap; }
+  input, select { font:inherit; width:100%; padding:4px 6px; border:1px solid var(--line); border-radius:4px; background:var(--bg); color:var(--fg); }
+  td.w-name { width:110px } td.w-host { width:180px } td.w-port { width:64px } td.w-mount { width:120px }
+  td.w-user, td.w-pass { width:100px } td.w-ver { width:70px } td.w-gga { width:140px } td.w-sec { width:56px }
+  td.w-act { width:140px; white-space:nowrap }
+  .badge { display:inline-block; padding:1px 8px; border-radius:10px; font-weight:600; font-size:12px; }
+  .ok { background:var(--okbg); color:var(--ok) } .warn { background:var(--warnbg); color:var(--warn) } .bad { background:var(--badbg); color:var(--bad) }
+  .muted { color:var(--muted) } .small { font-size:12px }
+  pre { margin:8px 0 0; padding:8px; background:var(--bg); border:1px solid var(--line); border-radius:6px; max-height:320px; overflow:auto; font-size:12px; }
+  tr.detail td { background:var(--bg); }
+  label.chk { display:inline-flex; gap:6px; align-items:center; }
+</style>
+</head>
+<body>
+<h1>NTRIP caster tester</h1>
+<p class="hint">Runs from this computer, on localhost only. Passwords are kept in this browser (plain text, like the AgIO profile).
+Leave <b>Mount</b> empty to fetch the sourcetable. <b>GGA</b> is <code>lat,lon,alt</code>, needed for VRS and NEAR mountpoints.</p>
+
+<div class="bar">
+  <button class="primary" id="runAll">Run all</button>
+  <button id="add">Add caster</button>
+  <label class="chk"><input type="checkbox" id="save" style="width:auto"> Save recordings to disk</label>
+  <span class="muted small" id="status"></span>
+</div>
+
+<div class="wrap">
+<table>
+  <thead><tr>
+    <th>Name</th><th>Host</th><th>Port</th><th>Mount</th><th>User</th><th>Password</th>
+    <th>Version</th><th>GGA</th><th>Sec</th><th></th><th>Result</th>
+  </tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+</div>
+
+<script>
+const KEY = 'ntripTester.rows.v1';
+const FIELDS = ['name','host','port','mount','user','pass','version','gga','seconds'];
+let rows = [];
+let busy = false;
+
+function load() {
+  try { rows = JSON.parse(localStorage.getItem(KEY)) || []; } catch (e) { rows = []; }
+  if (!rows.length) rows = [
+    { name:'Centipede', host:'caster.centipede.fr', port:2101, mount:'', user:'centipede', pass:'centipede', version:'auto', gga:'', seconds:15 },
+    { name:'RTK2go', host:'rtk2go.com', port:2101, mount:'', user:'', pass:'', version:'auto', gga:'', seconds:15 },
+  ];
+  document.getElementById('save').checked = localStorage.getItem(KEY + '.save') === '1';
+}
+function persist() {
+  try {
+    localStorage.setItem(KEY, JSON.stringify(rows.map(r => { const c = Object.assign({}, r); delete c.result; return c; })));
+    localStorage.setItem(KEY + '.save', document.getElementById('save').checked ? '1' : '0');
+  } catch (e) {}
+}
+const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function badge(res) {
+  if (!res) return '';
+  if (res.running) return '<span class="badge warn">running…</span>';
+  const cls = res.passed ? 'ok' : (['NoCorrections','CasterBusy'].includes(res.category) ? 'warn' : 'bad');
+  return '<span class="badge ' + cls + '">' + esc(res.category) + '</span>';
+}
+function ms(v) { return v >= 0 ? Math.round(v) + ' ms' : '–'; }
+
+function render() {
+  const tb = document.getElementById('rows');
+  tb.innerHTML = '';
+  rows.forEach((r, i) => {
+    const tr = document.createElement('tr');
+    const cell = (cls, f, type) => '<td class="' + cls + '"><input data-i="' + i + '" data-f="' + f + '" type="' + (type || 'text') + '" value="' + esc(r[f]) + '"></td>';
+    tr.innerHTML =
+      cell('w-name','name') + cell('w-host','host') + cell('w-port','port','number') + cell('w-mount','mount') +
+      cell('w-user','user') + cell('w-pass','pass','password') +
+      '<td class="w-ver"><select data-i="' + i + '" data-f="version">' +
+        ['auto','2','1'].map(v => '<option' + (String(r.version) === v ? ' selected' : '') + '>' + v + '</option>').join('') + '</select></td>' +
+      cell('w-gga','gga') + cell('w-sec','seconds','number') +
+      '<td class="w-act"><button data-run="' + i + '">Run</button> <button data-del="' + i + '">✕</button></td>' +
+      '<td>' + badge(r.result) + '<div class="small">' + summary(r.result) + '</div></td>';
+    tb.appendChild(tr);
+    if (r.result && !r.result.running && r.open) {
+      const d = document.createElement('tr');
+      d.className = 'detail';
+      d.innerHTML = '<td colspan="11">' + detail(r.result) + '</td>';
+      tb.appendChild(d);
+    }
+  });
+  tb.querySelectorAll('input,select').forEach(el => el.addEventListener('change', e => {
+    rows[+e.target.dataset.i][e.target.dataset.f] = e.target.value; persist();
+  }));
+  tb.querySelectorAll('[data-run]').forEach(b => b.addEventListener('click', () => runOne(+b.dataset.run)));
+  tb.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => { rows.splice(+b.dataset.del, 1); persist(); render(); }));
+  tb.querySelectorAll('[data-toggle]').forEach(b => b.addEventListener('click', () => { rows[+b.dataset.toggle].open = !rows[+b.dataset.toggle].open; render(); }));
+}
+
+function summary(res) {
+  if (!res || res.running) return '';
+  let s = '';
+  if (res.message) s += esc(res.message) + '<br>';
+  s += '<span class="muted">connect ' + ms(res.connectMs) + ' · header ' + ms(res.headerMs) + ' · first RTCM ' + ms(res.firstRtcmMs) +
+       ' · ' + res.frames + ' frames' + (res.crcFailures ? ' · ' + res.crcFailures + ' CRC errors' : '') + (res.chunked ? ' · chunked' : '') + '</span>';
+  if (res.usedVersion) s += ' <span class="muted">(v' + res.usedVersion + ')</span>';
+  return s + ' <a href="#" data-toggle="' + rows.indexOf(rows.find(r => r.result === res)) + '">details</a>';
+}
+
+function detail(res) {
+  let h = '<div><b>First line:</b> <code>' + esc(res.firstLine) + '</code></div>';
+  if (res.types.length) h += '<div class="small">RTCM: ' + res.types.map(t => t.type + '×' + t.count + (t.what ? ' (' + esc(t.what) + ')' : '')).join(', ') + '</div>';
+  if (res.mountpoints.length) h += '<div class="small">Mountpoints: ' + res.mountpoints.slice(0, 300).map(esc).join(', ') + '</div>';
+  if (res.file) h += '<div class="small muted">Saved: ' + esc(res.file) + '</div>';
+  return h + '<pre>' + esc(res.log) + '</pre>';
+}
+
+async function call(r, version) {
+  const body = {
+    host: r.host, port: +r.port || 2101, mount: r.mount, user: r.user, pass: r.pass,
+    version: version, gga: r.gga, seconds: +r.seconds || 15, save: document.getElementById('save').checked ? 1 : 0,
+  };
+  const resp = await fetch('/api/run', { method:'POST', headers:{ 'X-Recorder':'1', 'Content-Type':'application/json' }, body: JSON.stringify(body) });
+  if (!resp.ok) throw new Error(await resp.text());
+  const res = await resp.json();
+  res.usedVersion = version;
+  return res;
+}
+
+async function runOne(i) {
+  const r = rows[i];
+  r.result = { running: true }; render();
+  try {
+    let res;
+    if (String(r.version) === 'auto') {
+      res = await call(r, 2);
+      if (res.category === 'NotUnderstood' || res.category === 'CasterUnreachable' && res.bytes > 0) res = await call(r, 1);
+    } else {
+      res = await call(r, +r.version);
+    }
+    r.result = res;
+  } catch (e) {
+    r.result = { category: 'Error', message: String(e.message || e), passed: false, types: [], mountpoints: [], log: '', frames: 0, connectMs: -1, headerMs: -1, firstRtcmMs: -1 };
+  }
+  render();
+}
+
+async function runAll() {
+  if (busy) return;
+  busy = true;
+  const btn = document.getElementById('runAll'); btn.disabled = true;
+  for (let i = 0; i < rows.length; i++) {
+    document.getElementById('status').textContent = 'Running ' + (i + 1) + ' of ' + rows.length + '…';
+    await runOne(i);
+  }
+  document.getElementById('status').textContent = rows.filter(r => r.result && r.result.passed).length + ' of ' + rows.length + ' passed';
+  btn.disabled = false; busy = false;
+}
+
+document.getElementById('runAll').addEventListener('click', runAll);
+document.getElementById('add').addEventListener('click', () => {
+  rows.push({ name:'', host:'', port:2101, mount:'', user:'', pass:'', version:'auto', gga:'', seconds:15 }); persist(); render();
+});
+document.getElementById('save').addEventListener('change', persist);
+load(); render();
+</script>
+</body>
+</html>

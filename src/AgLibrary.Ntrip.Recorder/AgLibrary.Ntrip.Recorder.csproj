@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>AgLibrary.Ntrip.Recorder</RootNamespace>
+    <AssemblyName>NtripRecorder</AssemblyName>
+    <Version>1.0.0</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="System.Web.Extensions" />
+    <ProjectReference Include="..\AgLibrary.Ntrip\AgLibrary.Ntrip.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="ui.html" LogicalName="ui.html" />
+  </ItemGroup>
+
+</Project>
